@@ -20,8 +20,13 @@ class GameClient {
         // Movement state
         this.keysPressed = new Set();
         this.isMoving = false;
+        this.clickTarget = null;
+        this.connectionStatus = 'connecting';
+        this.lastFrameTime = 0;
+        this.targetFPS = 60;
         
         this.init();
+        this.startGameLoop();
     }
     
     init() {
@@ -29,6 +34,7 @@ class GameClient {
         this.loadWorldMap();
         this.connectToServer();
         this.setupKeyboardControls();
+        this.setupMouseControls();
     }
     
     setupCanvas() {
@@ -41,14 +47,13 @@ class GameClient {
             this.canvas.width = window.innerWidth;
             this.canvas.height = window.innerHeight;
             this.updateCamera();
-            this.draw();
         });
     }
     
     loadWorldMap() {
         this.worldImage = new Image();
         this.worldImage.onload = () => {
-            this.draw();
+            // Image loaded, ready to draw
         };
         this.worldImage.onerror = () => {
             console.error('Failed to load world map image');
@@ -61,7 +66,7 @@ class GameClient {
             this.websocket = new WebSocket('wss://codepath-mmorg.onrender.com');
             
             this.websocket.onopen = () => {
-                console.log('Connected to game server');
+                this.connectionStatus = 'connected';
                 this.joinGame();
             };
             
@@ -70,11 +75,11 @@ class GameClient {
             };
             
             this.websocket.onclose = () => {
-                console.log('Disconnected from game server');
+                this.connectionStatus = 'disconnected';
             };
             
             this.websocket.onerror = (error) => {
-                console.error('WebSocket error:', error);
+                this.connectionStatus = 'error';
             };
         } catch (error) {
             console.error('Failed to connect to server:', error);
@@ -93,6 +98,77 @@ class GameClient {
     setupKeyboardControls() {
         document.addEventListener('keydown', (event) => this.handleKeyDown(event));
         document.addEventListener('keyup', (event) => this.handleKeyUp(event));
+    }
+    
+    setupMouseControls() {
+        this.canvas.addEventListener('click', (event) => this.handleCanvasClick(event));
+    }
+    
+    handleCanvasClick(event) {
+        const rect = this.canvas.getBoundingClientRect();
+        const clickX = event.clientX - rect.left;
+        const clickY = event.clientY - rect.top;
+        
+        // Convert screen coordinates to world coordinates
+        const worldX = clickX + this.cameraX;
+        const worldY = clickY + this.cameraY;
+        
+        // Clamp to world boundaries
+        const clampedX = Math.max(0, Math.min(worldX, this.worldWidth));
+        const clampedY = Math.max(0, Math.min(worldY, this.worldHeight));
+        
+        this.clickTarget = { x: clampedX, y: clampedY };
+        this.sendClickMoveCommand(clampedX, clampedY);
+    }
+    
+    sendClickMoveCommand(x, y) {
+        if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        
+        // Store the target and start moving towards it
+        this.clickTarget = { x: x, y: y };
+        this.startMovingToTarget();
+    }
+    
+    startMovingToTarget() {
+        if (!this.clickTarget || !this.myPlayerId || !this.players[this.myPlayerId]) {
+            return;
+        }
+        
+        const myPlayer = this.players[this.myPlayerId];
+        const deltaX = this.clickTarget.x - myPlayer.x;
+        const deltaY = this.clickTarget.y - myPlayer.y;
+        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+        
+        // If we're close enough, stop moving
+        if (distance < 20) {
+            this.clickTarget = null;
+            this.sendStopCommand();
+            return;
+        }
+        
+        // Determine which direction to move
+        let direction = null;
+        if (Math.abs(deltaX) > Math.abs(deltaY)) {
+            direction = deltaX > 0 ? 'right' : 'left';
+        } else {
+            direction = deltaY > 0 ? 'down' : 'up';
+        }
+        
+        // Send move command
+        const moveMessage = {
+            action: 'move',
+            direction: direction
+        };
+        
+        this.websocket.send(JSON.stringify(moveMessage));
+        this.isMoving = true;
+        
+        // Continue moving after a short delay
+        setTimeout(() => {
+            this.startMovingToTarget();
+        }, 200);
     }
     
     handleKeyDown(event) {
@@ -175,8 +251,32 @@ class GameClient {
         this.isMoving = false;
     }
     
+    startGameLoop() {
+        const gameLoop = (currentTime) => {
+            const deltaTime = currentTime - this.lastFrameTime;
+            const targetFrameTime = 1000 / this.targetFPS;
+            
+            if (deltaTime >= targetFrameTime) {
+                this.update(deltaTime);
+                this.draw();
+                this.lastFrameTime = currentTime;
+            }
+            
+            requestAnimationFrame(gameLoop);
+        };
+        
+        requestAnimationFrame(gameLoop);
+    }
+    
+    update(deltaTime) {
+        // Update camera smoothly
+        this.updateCamera();
+        
+        // The click target movement is now handled by startMovingToTarget()
+        // No need to clear it here as it's handled in the movement function
+    }
+    
     handleServerMessage(message) {
-        console.log('Received message:', message);
         
         switch (message.action) {
             case 'join_game':
@@ -186,7 +286,6 @@ class GameClient {
                     this.avatars = message.avatars;
                     this.parseAvatarImages();
                     this.updateCamera();
-                    this.draw();
                 } else {
                     console.error('Join game failed:', message.error);
                 }
@@ -196,18 +295,15 @@ class GameClient {
                 this.players[message.player.id] = message.player;
                 this.avatars[message.avatar.name] = message.avatar;
                 this.parseAvatarImages();
-                this.draw();
                 break;
                 
             case 'players_moved':
                 Object.assign(this.players, message.players);
                 this.updateCamera();
-                this.draw();
                 break;
                 
             case 'player_left':
                 delete this.players[message.playerId];
-                this.draw();
                 break;
                 
             default:
@@ -233,7 +329,7 @@ class GameClient {
                     avatar.frames[direction].forEach((base64Data, index) => {
                         const img = new Image();
                         img.onload = () => {
-                            this.draw(); // Redraw when new avatar loads
+                            // Avatar frame loaded
                         };
                         img.src = base64Data;
                         avatar.parsedFrames[direction][index] = img;
@@ -252,8 +348,7 @@ class GameClient {
         this.cameraX = myPlayer.x - this.canvas.width / 2;
         this.cameraY = myPlayer.y - this.canvas.height / 2;
         
-        // Only clamp if the world is smaller than the screen
-        // This ensures avatar stays centered while preventing showing beyond map edges
+        // Only clamp if the world is larger than the screen
         if (this.worldWidth > this.canvas.width) {
             this.cameraX = Math.max(0, Math.min(this.cameraX, this.worldWidth - this.canvas.width));
         }
@@ -271,14 +366,11 @@ class GameClient {
     
     drawAvatar(player) {
         const avatar = this.avatars[player.avatar];
-        if (!avatar || !avatar.parsedFrames) {
-            console.log('Avatar data missing for:', player.username, 'avatar:', player.avatar);
-            return;
-        }
+        if (!avatar || !avatar.parsedFrames) return;
         
         const screenPos = this.worldToScreen(player.x, player.y);
         
-        // Check if avatar is visible on screen
+        // Check if avatar is visible on screen (accounting for zoom)
         if (screenPos.x < -50 || screenPos.x > this.canvas.width + 50 ||
             screenPos.y < -50 || screenPos.y > this.canvas.height + 50) {
             return;
@@ -287,10 +379,7 @@ class GameClient {
         // For west direction, use east frames and flip them
         const direction = player.facing === 'west' ? 'east' : player.facing;
         const frames = avatar.parsedFrames[direction];
-        if (!frames || !frames[player.animationFrame]) {
-            console.log('Missing frames for player:', player.username, 'facing:', player.facing, 'frame:', player.animationFrame);
-            return;
-        }
+        if (!frames || !frames[player.animationFrame]) return;
         
         const avatarImg = frames[player.animationFrame];
         
@@ -312,7 +401,6 @@ class GameClient {
         
         // Handle west direction by flipping horizontally
         if (player.facing === 'west') {
-            console.log('Drawing west-facing avatar for:', player.username, 'at:', screenPos);
             this.ctx.save();
             this.ctx.setTransform(-1, 0, 0, 1, screenPos.x, 0);
             this.ctx.drawImage(
@@ -366,9 +454,68 @@ class GameClient {
             0, 0, this.canvas.width, this.canvas.height
         );
         
+        // Draw click target indicator
+        if (this.clickTarget) {
+            this.drawClickTarget();
+        }
+        
         // Draw all players
         for (const playerId in this.players) {
             this.drawAvatar(this.players[playerId]);
+        }
+        
+        // Draw UI elements
+        this.drawUI();
+    }
+    
+    drawClickTarget() {
+        const screenPos = this.worldToScreen(this.clickTarget.x, this.clickTarget.y);
+        
+        this.ctx.save();
+        this.ctx.strokeStyle = '#00ff00';
+        this.ctx.lineWidth = 3;
+        this.ctx.setLineDash([5, 5]);
+        
+        // Draw circle around target
+        this.ctx.beginPath();
+        this.ctx.arc(screenPos.x, screenPos.y, 15, 0, Math.PI * 2);
+        this.ctx.stroke();
+        
+        // Draw crosshair
+        this.ctx.setLineDash([]);
+        this.ctx.beginPath();
+        this.ctx.moveTo(screenPos.x - 10, screenPos.y);
+        this.ctx.lineTo(screenPos.x + 10, screenPos.y);
+        this.ctx.moveTo(screenPos.x, screenPos.y - 10);
+        this.ctx.lineTo(screenPos.x, screenPos.y + 10);
+        this.ctx.stroke();
+        
+        this.ctx.restore();
+    }
+    
+    drawUI() {
+        // Draw connection status
+        this.ctx.save();
+        this.ctx.fillStyle = this.getConnectionStatusColor();
+        this.ctx.font = '14px Arial';
+        this.ctx.fillText(`Connection: ${this.connectionStatus.toUpperCase()}`, 10, 25);
+        
+        // Draw movement indicator
+        if (this.isMoving) {
+            this.ctx.fillStyle = '#ffff00';
+            this.ctx.fillText('Moving...', 10, 45);
+        }
+        
+        this.ctx.restore();
+    }
+    
+    getConnectionStatusColor() {
+        switch (this.connectionStatus) {
+            case 'connected': return '#00ff00';
+            case 'connecting': return '#ffff00';
+            case 'disconnected': return '#ff0000';
+            case 'error': return '#ff0000';
+            default: return '#ffffff';
         }
     }
 }
