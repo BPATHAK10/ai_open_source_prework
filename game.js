@@ -17,6 +17,10 @@ class GameClient {
         this.cameraX = 0;
         this.cameraY = 0;
         
+        // Movement state
+        this.keysPressed = new Set();
+        this.isMoving = false;
+        
         this.init();
     }
     
@@ -24,6 +28,7 @@ class GameClient {
         this.setupCanvas();
         this.loadWorldMap();
         this.connectToServer();
+        this.setupKeyboardControls();
     }
     
     setupCanvas() {
@@ -83,6 +88,91 @@ class GameClient {
         };
         
         this.websocket.send(JSON.stringify(joinMessage));
+    }
+    
+    setupKeyboardControls() {
+        document.addEventListener('keydown', (event) => this.handleKeyDown(event));
+        document.addEventListener('keyup', (event) => this.handleKeyUp(event));
+    }
+    
+    handleKeyDown(event) {
+        // Only handle arrow keys
+        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
+            return;
+        }
+        
+        // Prevent default browser behavior (scrolling)
+        event.preventDefault();
+        
+        // Add key to pressed keys set
+        this.keysPressed.add(event.code);
+        
+        // Send move command
+        this.sendMoveCommand();
+    }
+    
+    handleKeyUp(event) {
+        // Only handle arrow keys
+        if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
+            return;
+        }
+        
+        // Remove key from pressed keys set
+        this.keysPressed.delete(event.code);
+        
+        // If no movement keys are pressed, send stop command
+        if (this.keysPressed.size === 0) {
+            this.sendStopCommand();
+        }
+    }
+    
+    sendMoveCommand() {
+        if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        
+        // Send all pressed directions for proper diagonal movement
+        const directions = [];
+        
+        if (this.keysPressed.has('ArrowUp')) {
+            directions.push('up');
+        }
+        if (this.keysPressed.has('ArrowDown')) {
+            directions.push('down');
+        }
+        if (this.keysPressed.has('ArrowLeft')) {
+            directions.push('left');
+        }
+        if (this.keysPressed.has('ArrowRight')) {
+            directions.push('right');
+        }
+        
+        // Send move command for each direction (for diagonal movement)
+        directions.forEach(direction => {
+            const moveMessage = {
+                action: 'move',
+                direction: direction
+            };
+            
+            this.websocket.send(JSON.stringify(moveMessage));
+        });
+        
+        if (directions.length > 0) {
+            this.isMoving = true;
+        }
+    }
+    
+    sendStopCommand() {
+        if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        
+        const stopMessage = {
+            action: 'stop'
+        };
+        
+        this.websocket.send(JSON.stringify(stopMessage));
+        this.isMoving = false;
     }
     
     handleServerMessage(message) {
@@ -181,7 +271,10 @@ class GameClient {
     
     drawAvatar(player) {
         const avatar = this.avatars[player.avatar];
-        if (!avatar || !avatar.parsedFrames) return;
+        if (!avatar || !avatar.parsedFrames) {
+            console.log('Avatar data missing for:', player.username, 'avatar:', player.avatar);
+            return;
+        }
         
         const screenPos = this.worldToScreen(player.x, player.y);
         
@@ -191,8 +284,13 @@ class GameClient {
             return;
         }
         
-        const frames = avatar.parsedFrames[player.facing];
-        if (!frames || !frames[player.animationFrame]) return;
+        // For west direction, use east frames and flip them
+        const direction = player.facing === 'west' ? 'east' : player.facing;
+        const frames = avatar.parsedFrames[direction];
+        if (!frames || !frames[player.animationFrame]) {
+            console.log('Missing frames for player:', player.username, 'facing:', player.facing, 'frame:', player.animationFrame);
+            return;
+        }
         
         const avatarImg = frames[player.animationFrame];
         
@@ -214,14 +312,17 @@ class GameClient {
         
         // Handle west direction by flipping horizontally
         if (player.facing === 'west') {
-            this.ctx.scale(-1, 1);
+            console.log('Drawing west-facing avatar for:', player.username, 'at:', screenPos);
+            this.ctx.save();
+            this.ctx.setTransform(-1, 0, 0, 1, screenPos.x, 0);
             this.ctx.drawImage(
                 avatarImg,
-                -screenPos.x - avatarWidth / 2,
+                -avatarWidth / 2,
                 screenPos.y - avatarHeight / 2,
                 avatarWidth,
                 avatarHeight
             );
+            this.ctx.restore();
         } else {
             this.ctx.drawImage(
                 avatarImg,
